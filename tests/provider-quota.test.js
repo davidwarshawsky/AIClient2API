@@ -93,4 +93,33 @@ describe('provider account quota API', () => {
             { key: 'monthly', usedPercentage: 81, durationMinutes: 43_200, resetsAt: null }
         ]);
     });
+
+    test('normalizes Antigravity model quota fractions to the highest account usage', async () => {
+        const getUsageLimits = jest.fn().mockResolvedValue({
+            tierId: 'Google AI Pro',
+            models: {
+                'gemini-3-pro': { quotaInfo: { remainingFraction: 0.6 } },
+                'gemini-3-flash': { quotaInfo: { remainingFraction: 0.15 } },
+                'model-without-quota': { quotaInfo: {} }
+            }
+        });
+        getServiceAdapter.mockReturnValue({ getUsageLimits });
+        const response = { writeHead: jest.fn(), end: jest.fn() };
+        const providerPoolManager = {
+            providerPools: { 'gemini-antigravity': [{ uuid: 'antigravity-account-1' }] }
+        };
+
+        await handleGetProviderQuota(
+            {}, response, {}, providerPoolManager, 'gemini-antigravity', 'antigravity-account-1'
+        );
+
+        expect(response.writeHead).toHaveBeenCalledWith(200, { 'Content-Type': 'application/json' });
+        const body = JSON.parse(response.end.mock.calls[0][0]);
+        expect(body.quota).toEqual({ available: true, usedPercentage: 85 });
+        expect(getUsageLimits).toHaveBeenCalledTimes(1);
+        expect(getServiceAdapter).toHaveBeenCalledWith(expect.objectContaining({
+            MODEL_PROVIDER: 'gemini-antigravity',
+            uuid: 'antigravity-account-1'
+        }));
+    });
 });

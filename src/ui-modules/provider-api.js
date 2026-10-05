@@ -348,11 +348,28 @@ function normalizeCodexQuota(usage) {
     };
 }
 
+function normalizeAntigravityQuota(usage) {
+    const usedPercentages = Object.values(usage?.models || {}).flatMap(model => {
+        const remainingValue = model?.quotaInfo?.remainingFraction;
+        if (remainingValue == null) return [];
+
+        const remainingFraction = Number(remainingValue);
+        if (!Number.isFinite(remainingFraction)) return [];
+
+        return [Math.max(0, Math.min(100, (1 - remainingFraction) * 100))];
+    });
+
+    return {
+        available: usedPercentages.length > 0,
+        usedPercentage: usedPercentages.length > 0 ? Math.max(...usedPercentages) : null
+    };
+}
+
 /**
  * Read quota for one provider node with a supported account-level quota endpoint.
  */
 export async function handleGetProviderQuota(req, res, currentConfig, providerPoolManager, providerType, providerUuid) {
-    if (providerType !== 'github-copilot' && providerType !== 'openai-codex-oauth') {
+    if (providerType !== 'github-copilot' && providerType !== 'openai-codex-oauth' && providerType !== 'gemini-antigravity') {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: { message: 'Quota lookup is not supported for this provider.' } }));
         return true;
@@ -388,7 +405,9 @@ export async function handleGetProviderQuota(req, res, currentConfig, providerPo
         const quotaResponse = await quotaMethod.call(serviceAdapter);
         const quota = providerType === 'github-copilot'
             ? quotaResponse
-            : normalizeCodexQuota(quotaResponse);
+            : providerType === 'openai-codex-oauth'
+                ? normalizeCodexQuota(quotaResponse)
+                : normalizeAntigravityQuota(quotaResponse);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ providerType, providerUuid, quota }));
         return true;
