@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import os from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
+import { StringDecoder } from 'node:string_decoder';
 import { CopilotClient } from '@github/copilot-sdk';
 import logger from '../../utils/logger.js';
 import { configureAxiosProxy, configureTLSSidecar, isTLSSidecarEnabledForProvider } from '../../utils/proxy-utils.js';
@@ -195,7 +196,7 @@ export class GitHubCopilotApiService {
         return { ...quota };
     }
 
-    async createAutoSession(requestBody, autoTier) {
+    async createAutoSession(requestBody, autoTier, streaming = false) {
         if (Array.isArray(requestBody.tools) && requestBody.tools.length > 0) {
             throw new Error('[GitHub Copilot] Auto mode via the Copilot SDK does not support OpenAI tool-call requests yet.');
         }
@@ -206,6 +207,7 @@ export class GitHubCopilotApiService {
             model: 'auto',
             capi: { autoTier },
             availableTools: [],
+            streaming,
             systemMessage: { mode: 'append', content: systemPrompt }
         });
         return { client, session, prompt, attachments };
@@ -281,7 +283,7 @@ export class GitHubCopilotApiService {
             );
             const context = this.getAutoRequestContext(requestId, autoTier);
             logger.info(`[GitHub Copilot SDK] Auto stream started (${context})`);
-            ({ client, session, prompt, attachments } = await this.createAutoSession(requestBody, autoTier));
+            ({ client, session, prompt, attachments } = await this.createAutoSession(requestBody, autoTier, true));
             const id = `chatcmpl-${randomUUID()}`;
             const created = Math.floor(Date.now() / 1000);
             deltaStream = new Readable({ objectMode: true, read() {} });
@@ -425,6 +427,7 @@ export class GitHubCopilotApiService {
 
         // GitHub Copilot streaming requires stream to be set to true
         const streamRequestBody = { ...body, stream: true };
+        let hasYieldedChunk = false;
 
         try {
             const axiosConfig = {
@@ -441,9 +444,10 @@ export class GitHubCopilotApiService {
 
             const stream = response.data;
             let buffer = '';
+            const decoder = new StringDecoder('utf8');
 
             for await (const chunk of stream) {
-                buffer += chunk.toString();
+                buffer += typeof chunk === 'string' ? chunk : decoder.write(chunk);
                 let newlineIndex;
                 while ((newlineIndex = buffer.indexOf('\n')) !== -1) {
                     const line = buffer.substring(0, newlineIndex).trim();
@@ -456,6 +460,7 @@ export class GitHubCopilotApiService {
                         }
                         try {
                             const parsedChunk = JSON.parse(jsonData);
+                            hasYieldedChunk = true;
                             yield parsedChunk;
                         } catch (e) {
                             logger.warn("[GitHubCopilotApiService] Failed to parse stream chunk JSON:", e.message, "Data:", jsonData);
@@ -465,6 +470,7 @@ export class GitHubCopilotApiService {
                     }
                 }
             }
+            buffer += decoder.end();
         } catch (error) {
             const status = error.response?.status;
             const data = error.response?.data;
@@ -486,7 +492,7 @@ export class GitHubCopilotApiService {
                     logger.warn(`[GitHub Copilot API] Received 429 with Retry-After: ${retryAfter}ms during stream. Throwing to upper layer.`);
                     throw error;
                 }
-                if (retryCount < maxRetries) {
+                if (!hasYieldedChunk && retryCount < maxRetries) {
                     const delay = baseDelay * Math.pow(2, retryCount);
                     logger.info(`[GitHub Copilot API] Received 429 (Too Many Requests) during stream. No Retry-After found. Retrying in ${delay}ms... (attempt ${retryCount + 1}/${maxRetries})`);
                     await new Promise(resolve => setTimeout(resolve, delay));
@@ -496,7 +502,7 @@ export class GitHubCopilotApiService {
             }
 
             // Handle other retryable errors (5xx server errors)
-            if (status >= 500 && status < 600 && retryCount < maxRetries) {
+            if (!hasYieldedChunk && status >= 500 && status < 600 && retryCount < maxRetries) {
                 const delay = baseDelay * Math.pow(2, retryCount);
                 logger.info(`[GitHub Copilot API] Received ${status} server error during stream. Retrying in ${delay}ms... (attempt ${retryCount + 1}/${maxRetries})`);
                 await new Promise(resolve => setTimeout(resolve, delay));
@@ -505,7 +511,7 @@ export class GitHubCopilotApiService {
             }
 
             // Handle network errors with exponential backoff
-            if (isNetworkError && retryCount < maxRetries) {
+            if (!hasYieldedChunk && isNetworkError && retryCount < maxRetries) {
                 const delay = baseDelay * Math.pow(2, retryCount);
                 const errorIdentifier = errorCode || errorMessage.substring(0, 50);
                 logger.info(`[GitHub Copilot API] Network error (${errorIdentifier}) during stream. Retrying in ${delay}ms... (attempt ${retryCount + 1}/${maxRetries})`);

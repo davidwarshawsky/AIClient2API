@@ -17,20 +17,27 @@ import { GitHubCopilotApiService, normalizeCopilotAutoTier } from '../src/provid
 import { PROVIDER_MODELS } from '../src/providers/provider-models.js';
 import { ProviderPoolManager } from '../src/providers/provider-pool-manager.js';
 import logger from '../src/utils/logger.js';
+import { Readable } from 'node:stream';
 
 describe('GitHub Copilot Auto routing', () => {
     function createService() {
         let emit;
+        let streamingEnabled = false;
+        let idleEmitted = false;
         const session = {
             sessionId: 'test-session',
             sendAndWait: jest.fn().mockResolvedValue({
                 data: { content: 'Auto response', outputTokens: 2 }
             }),
             send: jest.fn(async () => {
-                emit({ type: 'assistant.message_delta', data: { deltaContent: 'Auto ' } });
-                emit({ type: 'assistant.message_delta', data: { deltaContent: 'response' } });
+                if (streamingEnabled) {
+                    emit({ type: 'assistant.message_delta', data: { deltaContent: 'Auto ' } });
+                    await new Promise(resolve => setImmediate(resolve));
+                    emit({ type: 'assistant.message_delta', data: { deltaContent: 'response' } });
+                }
                 emit({ type: 'assistant.message', data: { content: 'Auto response' } });
                 emit({ type: 'session.idle', data: { mode: 'interactive' } });
+                idleEmitted = true;
             }),
             on: jest.fn(handler => {
                 emit = handler;
@@ -40,7 +47,10 @@ describe('GitHub Copilot Auto routing', () => {
         };
         const client = {
             start: jest.fn().mockResolvedValue(undefined),
-            createSession: jest.fn().mockResolvedValue(session),
+            createSession: jest.fn(async options => {
+                streamingEnabled = options.streaming === true;
+                return session;
+            }),
             deleteSession: jest.fn().mockResolvedValue(undefined)
         };
         const service = new GitHubCopilotApiService({
@@ -48,7 +58,7 @@ describe('GitHub Copilot Auto routing', () => {
             uuid: 'test-provider'
         });
         service.createSdkClient = () => client;
-        return { service, client, session };
+        return { service, client, session, isIdleEmitted: () => idleEmitted };
     }
 
     beforeEach(() => {
@@ -92,6 +102,79 @@ describe('GitHub Copilot Auto routing', () => {
             model: 'gpt-4.1',
             messages: [{ role: 'user', content: 'Health check.' }]
         }));
+    });
+
+    test('retries a stream failure before the first SSE chunk', async () => {
+        const { service } = createService();
+        service.config.REQUEST_MAX_RETRIES = 1;
+        service.config.REQUEST_BASE_DELAY = 1;
+        const networkError = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+        const firstAttempt = Readable.from((async function* () {
+            throw networkError;
+        })());
+        const retryAttempt = Readable.from([
+            Buffer.from('data: {"id":"completion-2","choices":[{"delta":{"content":"Hello world"}}]}\n\n'),
+            Buffer.from('data: [DONE]\n\n')
+        ]);
+        service.axiosInstance.request = jest.fn()
+            .mockResolvedValueOnce({ data: firstAttempt })
+            .mockResolvedValueOnce({ data: retryAttempt });
+
+        const chunks = [];
+        for await (const chunk of service.generateContentStream('gpt-4.1', { model: 'gpt-4.1' })) {
+            chunks.push(chunk);
+        }
+
+        expect(chunks).toHaveLength(1);
+        expect(chunks[0].id).toBe('completion-2');
+        expect(service.axiosInstance.request).toHaveBeenCalledTimes(2);
+    });
+
+    test('propagates a stream failure after the first SSE chunk without restarting', async () => {
+        const { service } = createService();
+        service.config.REQUEST_MAX_RETRIES = 1;
+        service.config.REQUEST_BASE_DELAY = 1;
+        const networkError = Object.assign(new Error('socket hang up'), { code: 'ECONNRESET' });
+        const firstAttempt = Readable.from((async function* () {
+            yield Buffer.from('data: {"id":"completion-1","choices":[{"delta":{"content":"Hello "}}]}\n\n');
+            throw networkError;
+        })());
+        const retryAttempt = Readable.from([
+            Buffer.from('data: {"id":"completion-2","choices":[{"delta":{"content":"Hello world"}}]}\n\n'),
+            Buffer.from('data: [DONE]\n\n')
+        ]);
+        service.axiosInstance.request = jest.fn()
+            .mockResolvedValueOnce({ data: firstAttempt })
+            .mockResolvedValueOnce({ data: retryAttempt });
+
+        const stream = service.generateContentStream('gpt-4.1', { model: 'gpt-4.1' });
+        const firstChunk = await stream.next();
+        expect(firstChunk.value.choices[0].delta.content).toBe('Hello ');
+        await expect(stream.next()).rejects.toBe(networkError);
+        expect(service.axiosInstance.request).toHaveBeenCalledTimes(1);
+    });
+
+    test('decodes Chinese and emoji characters split across HTTP buffers', async () => {
+        const { service } = createService();
+        const sseBuffer = Buffer.from('data: {"id":"completion-1","choices":[{"delta":{"content":"你好🙂"}}]}\n\n');
+        const chineseSplitIndex = sseBuffer.indexOf(Buffer.from('你')) + 1;
+        const emojiSplitIndex = sseBuffer.indexOf(Buffer.from('🙂')) + 2;
+        service.axiosInstance.request = jest.fn().mockResolvedValue({
+            data: Readable.from([
+                sseBuffer.subarray(0, chineseSplitIndex),
+                sseBuffer.subarray(chineseSplitIndex, emojiSplitIndex),
+                sseBuffer.subarray(emojiSplitIndex),
+                Buffer.from('data: [DONE]\n\n')
+            ])
+        });
+
+        const chunks = [];
+        for await (const chunk of service.generateContentStream('gpt-4.1', { model: 'gpt-4.1' })) {
+            chunks.push(chunk);
+        }
+
+        expect(chunks).toHaveLength(1);
+        expect(chunks[0].choices[0].delta.content).toBe('你好🙂');
     });
 
     test('preserves Copilot API error details for health-check diagnostics', async () => {
@@ -248,21 +331,27 @@ describe('GitHub Copilot Auto routing', () => {
     });
 
     test('streams SDK deltas as OpenAI chat-completion chunks', async () => {
-        const { service, client } = createService();
+        const { service, client, isIdleEmitted } = createService();
         const chunks = [];
+        const idleStateWhenContentArrived = [];
         for await (const chunk of service.generateContentStream('auto', {
             auto_tier: 'efficiency',
             messages: [{ role: 'user', content: 'Say hello.' }]
         })) {
             chunks.push(chunk);
+            if (chunk.choices[0].delta.content) {
+                idleStateWhenContentArrived.push(isIdleEmitted());
+            }
         }
 
         expect(client.createSession).toHaveBeenCalledWith(expect.objectContaining({
             model: 'auto',
-            capi: { autoTier: 'efficiency' }
+            capi: { autoTier: 'efficiency' },
+            streaming: true
         }));
         expect(chunks.map(chunk => chunk.choices[0].delta.content).filter(Boolean))
             .toEqual(['Auto ', 'response']);
+        expect(idleStateWhenContentArrived[0]).toBe(false);
         expect(chunks.at(-1).choices[0].finish_reason).toBe('stop');
         expect(client.deleteSession).toHaveBeenCalledWith('test-session');
     });
