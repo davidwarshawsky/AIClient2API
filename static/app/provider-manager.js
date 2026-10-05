@@ -12,6 +12,7 @@ import { updateConfigProviderConfigs } from './config-manager.js';
 import { loadConfigList, updateProviderFilterOptions } from './upload-config-manager.js';
 import { setServiceMode } from './event-handlers.js';
 import { createCodexQuotaUsageLoader } from './codex-quota-badges.js';
+import { createCopilotQuotaUsageLoader } from './copilot-quota-summary.js';
 
 // 保存初始服务器时间和运行时间
 let initialServerTime = null;
@@ -21,6 +22,9 @@ let isStaticProviderConfigsUpdated = false;
 let cachedSupportedProviders = null;
 let latestProvidersAccessInfo = null;
 const loadCodexQuotaUsage = createCodexQuotaUsageLoader({
+    apiClient: { get: url => window.apiClient.get(url) }
+});
+const loadCopilotQuotaUsage = createCopilotQuotaUsageLoader({
     apiClient: { get: url => window.apiClient.get(url) }
 });
 
@@ -458,6 +462,12 @@ function renderProviders(providers, supportedProviders = []) {
                         <span class="provider-stat-value" data-codex-quota-summary>${t('providers.codexQuota.loading')}</span>
                     </div>
                 ` : ''}
+                ${providerType === 'github-copilot' ? `
+                    <div class="provider-stat">
+                        <span class="provider-stat-label" data-i18n="providers.stat.copilotQuotaUsed" title="${t('providers.copilotQuota.summaryTitle')}">${t('providers.stat.copilotQuotaUsed')}</span>
+                        <span class="provider-stat-value" data-copilot-quota-summary>${t('providers.copilotQuota.loading')}</span>
+                    </div>
+                ` : ''}
                 <div class="provider-stat">
                     <span class="provider-stat-label" data-i18n="providers.stat.usageCount">${t('providers.stat.usageCount')}</span>
                     <span class="provider-stat-value">${usageCount}</span>
@@ -489,6 +499,15 @@ function renderProviders(providers, supportedProviders = []) {
                 quotaSummary.textContent = summary.available
                     ? `${summary.usedPercent}/${summary.totalPercent}%`
                     : t('providers.codexQuota.unavailable');
+            });
+        }
+        if (providerType === 'github-copilot') {
+            const quotaSummary = providerDiv.querySelector('[data-copilot-quota-summary]');
+            loadCopilotQuotaUsage(accounts).then(summary => {
+                if (!quotaSummary?.isConnected) return;
+                quotaSummary.textContent = summary.available
+                    ? `${summary.usedPercent}/${summary.totalPercent}%`
+                    : t('providers.copilotQuota.unavailable');
             });
         }
         
