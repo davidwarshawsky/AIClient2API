@@ -94,16 +94,27 @@ describe('provider account quota API', () => {
         ]);
     });
 
-    test('normalizes Antigravity model quota fractions to the highest account usage', async () => {
-        const getUsageLimits = jest.fn().mockResolvedValue({
-            tierId: 'Google AI Pro',
-            models: {
-                'gemini-3-pro': { quotaInfo: { remainingFraction: 0.6 } },
-                'gemini-3-flash': { quotaInfo: { remainingFraction: 0.15 } },
-                'model-without-quota': { quotaInfo: {} }
-            }
+    test('normalizes grouped Antigravity summary quotas into separate Gemini and Claude usage', async () => {
+        const getQuotaSummary = jest.fn().mockResolvedValue({
+            source: 'summary',
+            groups: [
+                {
+                    displayName: 'Gemini Models',
+                    buckets: [
+                        { bucketId: 'gemini-session', remainingFraction: 0.6 },
+                        { bucketId: 'gemini-weekly', remainingFraction: 0.15 }
+                    ]
+                },
+                {
+                    displayName: 'Claude + GPT Models',
+                    buckets: [
+                        { bucketId: 'claude-session', remainingFraction: 0.8 },
+                        { bucketId: 'claude-weekly', remainingFraction: 0.3 }
+                    ]
+                }
+            ]
         });
-        getServiceAdapter.mockReturnValue({ getUsageLimits });
+        getServiceAdapter.mockReturnValue({ getQuotaSummary });
         const response = { writeHead: jest.fn(), end: jest.fn() };
         const providerPoolManager = {
             providerPools: { 'gemini-antigravity': [{ uuid: 'antigravity-account-1' }] }
@@ -115,8 +126,11 @@ describe('provider account quota API', () => {
 
         expect(response.writeHead).toHaveBeenCalledWith(200, { 'Content-Type': 'application/json' });
         const body = JSON.parse(response.end.mock.calls[0][0]);
-        expect(body.quota).toEqual({ available: true, usedPercentage: 85 });
-        expect(getUsageLimits).toHaveBeenCalledTimes(1);
+        expect(body.quota).toEqual({
+            gemini: { available: true, usedPercentage: 85 },
+            claude: { available: true, usedPercentage: 70 }
+        });
+        expect(getQuotaSummary).toHaveBeenCalledTimes(1);
         expect(getServiceAdapter).toHaveBeenCalledWith(expect.objectContaining({
             MODEL_PROVIDER: 'gemini-antigravity',
             uuid: 'antigravity-account-1'

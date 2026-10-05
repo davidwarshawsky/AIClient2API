@@ -10,15 +10,20 @@ describe('Antigravity provider quota summary', () => {
         ];
         const apiClient = {
             get: jest.fn(async url => url.endsWith('/antigravity-a/quota')
-                ? { quota: { available: true, usedPercentage: 24.2 } }
-                : { quota: { available: true, usedPercentage: 79.7 } })
+                ? { quota: {
+                    gemini: { available: true, usedPercentage: 24.2 },
+                    claude: { available: true, usedPercentage: 42.1 }
+                } }
+                : { quota: {
+                    gemini: { available: true, usedPercentage: 79.7 },
+                    claude: { available: true, usedPercentage: 15.2 }
+                } })
         };
         const loadUsage = createAntigravityQuotaUsageLoader({ apiClient });
 
         await expect(loadUsage(providers)).resolves.toEqual({
-            available: true,
-            usedPercent: 104,
-            totalPercent: 200
+            gemini: { available: true, usedPercent: 104, totalPercent: 200 },
+            claude: { available: true, usedPercent: 57, totalPercent: 200 }
         });
         expect(apiClient.get).toHaveBeenCalledTimes(2);
         expect(apiClient.get).toHaveBeenCalledWith('/providers/gemini-antigravity/antigravity-a/quota');
@@ -29,9 +34,8 @@ describe('Antigravity provider quota summary', () => {
         const loadUsage = createAntigravityQuotaUsageLoader({ apiClient });
 
         await expect(loadUsage([{ uuid: 'antigravity-a', isHealthy: true }])).resolves.toEqual({
-            available: false,
-            usedPercent: null,
-            totalPercent: 100
+            gemini: { available: false, usedPercent: null, totalPercent: 100 },
+            claude: { available: false, usedPercent: null, totalPercent: 100 }
         });
     });
 
@@ -40,10 +44,37 @@ describe('Antigravity provider quota summary', () => {
         const loadUsage = createAntigravityQuotaUsageLoader({ apiClient });
 
         await expect(loadUsage([{ uuid: 'antigravity-a', isHealthy: false }])).resolves.toEqual({
-            available: true,
-            usedPercent: 0,
-            totalPercent: 0
+            gemini: { available: true, usedPercent: 0, totalPercent: 0 },
+            claude: { available: true, usedPercent: 0, totalPercent: 0 }
         });
         expect(apiClient.get).not.toHaveBeenCalled();
+    });
+
+    test('keeps quota families independently unavailable when a group is missing', async () => {
+        const apiClient = {
+            get: jest.fn().mockResolvedValue({
+                quota: { gemini: { available: true, usedPercentage: 52 } }
+            })
+        };
+        const loadUsage = createAntigravityQuotaUsageLoader({ apiClient });
+
+        await expect(loadUsage([{ uuid: 'antigravity-a', isHealthy: true }])).resolves.toEqual({
+            gemini: { available: true, usedPercent: 52, totalPercent: 100 },
+            claude: { available: false, usedPercent: null, totalPercent: 100 }
+        });
+    });
+
+    test('does not treat an available family with a missing percentage as zero usage', async () => {
+        const apiClient = {
+            get: jest.fn().mockResolvedValue({
+                quota: { gemini: { available: true, usedPercentage: null } }
+            })
+        };
+        const loadUsage = createAntigravityQuotaUsageLoader({ apiClient });
+
+        await expect(loadUsage([{ uuid: 'antigravity-a', isHealthy: true }])).resolves.toEqual({
+            gemini: { available: false, usedPercent: null, totalPercent: 100 },
+            claude: { available: false, usedPercent: null, totalPercent: 100 }
+        });
     });
 });

@@ -8,25 +8,31 @@ export function createAntigravityQuotaUsageLoader({ apiClient } = {}) {
                 const response = await apiClient.get(
                     `/providers/gemini-antigravity/${encodeURIComponent(provider.uuid)}/quota`
                 );
-                const quota = response?.quota;
-                const usedPercentage = Number(quota?.usedPercentage);
-                if (!quota?.available || !Number.isFinite(usedPercentage)) return null;
-
-                return Math.round(Math.min(100, Math.max(0, usedPercentage)));
+                return response?.quota || null;
             } catch {
                 return null;
             }
         }));
 
         const totalPercent = healthyProviders.length * 100;
-        if (accountUsage.some(percentage => percentage === null)) {
-            return { available: false, usedPercent: null, totalPercent };
-        }
+        return Object.fromEntries(['gemini', 'claude'].map(family => {
+            const percentages = accountUsage.map(quota => {
+                const familyQuota = quota?.[family];
+                const rawPercentage = familyQuota?.usedPercentage;
+                if (!familyQuota?.available || rawPercentage == null) return null;
 
-        return {
-            available: true,
-            usedPercent: accountUsage.reduce((sum, percentage) => sum + percentage, 0),
-            totalPercent
-        };
+                const usedPercentage = Number(rawPercentage);
+                return Number.isFinite(usedPercentage)
+                    ? Math.round(Math.min(100, Math.max(0, usedPercentage)))
+                    : null;
+            });
+            const available = percentages.every(percentage => percentage !== null);
+
+            return [family, {
+                available,
+                usedPercent: available ? percentages.reduce((sum, percentage) => sum + percentage, 0) : null,
+                totalPercent
+            }];
+        }));
     };
 }

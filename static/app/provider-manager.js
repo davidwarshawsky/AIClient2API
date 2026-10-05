@@ -474,8 +474,12 @@ function renderProviders(providers, supportedProviders = []) {
                 ` : ''}
                 ${providerType === 'gemini-antigravity' ? `
                     <div class="provider-stat">
-                        <span class="provider-stat-label" data-i18n="providers.stat.antigravityQuotaUsed" title="${t('providers.antigravityQuota.summaryTitle')}">${t('providers.stat.antigravityQuotaUsed')}</span>
-                        <span class="provider-stat-value" data-antigravity-quota-summary>${t('providers.antigravityQuota.loading')}</span>
+                        <span class="provider-stat-label" data-i18n="providers.stat.antigravityGeminiQuota" title="${t('providers.antigravityQuota.summaryTitle')}">${t('providers.stat.antigravityGeminiQuota')}</span>
+                        <span class="provider-stat-value" data-antigravity-gemini-quota>${t('providers.antigravityQuota.loading')}</span>
+                    </div>
+                    <div class="provider-stat">
+                        <span class="provider-stat-label" data-i18n="providers.stat.antigravityClaudeQuota" title="${t('providers.antigravityQuota.summaryTitle')}">${t('providers.stat.antigravityClaudeQuota')}</span>
+                        <span class="provider-stat-value" data-antigravity-claude-quota>${t('providers.antigravityQuota.loading')}</span>
                     </div>
                 ` : ''}
                 <div class="provider-stat">
@@ -521,11 +525,15 @@ function renderProviders(providers, supportedProviders = []) {
             });
         }
         if (providerType === 'gemini-antigravity') {
-            const quotaSummary = providerDiv.querySelector('[data-antigravity-quota-summary]');
+            const geminiQuota = providerDiv.querySelector('[data-antigravity-gemini-quota]');
+            const claudeQuota = providerDiv.querySelector('[data-antigravity-claude-quota]');
             loadAntigravityQuotaUsage(accounts).then(summary => {
-                if (!quotaSummary?.isConnected) return;
-                quotaSummary.textContent = summary.available
-                    ? `${summary.usedPercent}/${summary.totalPercent}%`
+                if (!geminiQuota?.isConnected || !claudeQuota?.isConnected) return;
+                geminiQuota.textContent = summary.gemini.available
+                    ? `${summary.gemini.usedPercent}/${summary.gemini.totalPercent}%`
+                    : t('providers.antigravityQuota.unavailable');
+                claudeQuota.textContent = summary.claude.available
+                    ? `${summary.claude.usedPercent}/${summary.claude.totalPercent}%`
                     : t('providers.antigravityQuota.unavailable');
             });
         }

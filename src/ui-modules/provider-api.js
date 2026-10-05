@@ -349,20 +349,50 @@ function normalizeCodexQuota(usage) {
 }
 
 function normalizeAntigravityQuota(usage) {
-    const usedPercentages = Object.values(usage?.models || {}).flatMap(model => {
-        const remainingValue = model?.quotaInfo?.remainingFraction;
-        if (remainingValue == null) return [];
-
-        const remainingFraction = Number(remainingValue);
-        if (!Number.isFinite(remainingFraction)) return [];
-
-        return [Math.max(0, Math.min(100, (1 - remainingFraction) * 100))];
-    });
-
-    return {
-        available: usedPercentages.length > 0,
-        usedPercentage: usedPercentages.length > 0 ? Math.max(...usedPercentages) : null
+    const familyUsage = { gemini: [], claude: [] };
+    const getFamily = (...names) => {
+        const value = names.filter(Boolean).join(' ').toLowerCase();
+        if (/claude|anthropic|gpt/.test(value)) return 'claude';
+        if (value.includes('gemini')) return 'gemini';
+        return null;
     };
+    const addBucket = (bucket, familyHint = null) => {
+        const remaining = bucket?.remaining || {};
+        const fractionValue = bucket?.remainingFraction ?? bucket?.remaining_fraction ??
+            remaining.remainingFraction ?? remaining.remaining_fraction;
+        const fraction = Number(fractionValue);
+        const family = familyHint || getFamily(
+            bucket?.group,
+            bucket?.modelId,
+            bucket?.model_id,
+            bucket?.bucketId,
+            bucket?.bucket_id,
+            bucket?.displayName,
+            bucket?.display_name
+        );
+        if (!family || fractionValue == null || typeof fractionValue === 'boolean' || !Number.isFinite(fraction)) return;
+
+        familyUsage[family].push(Math.round(Math.max(0, Math.min(100, (1 - fraction) * 100))));
+    };
+
+    if (usage?.source === 'summary') {
+        for (const group of usage.groups || []) {
+            const family = getFamily(group?.displayName, group?.display_name);
+            for (const bucket of group?.buckets || []) addBucket(bucket, family);
+        }
+    } else if (usage?.source === 'quota') {
+        for (const bucket of usage.buckets || []) addBucket(bucket);
+    } else {
+        for (const [modelId, model] of Object.entries(usage?.models || {})) {
+            const quotaInfo = model?.quotaInfo || model?.quota_info || {};
+            addBucket({ ...quotaInfo, modelId });
+        }
+    }
+
+    return Object.fromEntries(Object.entries(familyUsage).map(([family, percentages]) => [family, {
+        available: percentages.length > 0,
+        usedPercentage: percentages.length > 0 ? Math.max(...percentages) : null
+    }]));
 }
 
 /**
@@ -395,7 +425,9 @@ export async function handleGetProviderQuota(req, res, currentConfig, providerPo
         const serviceAdapter = getServiceAdapter(serviceConfig);
         const quotaMethod = providerType === 'github-copilot'
             ? serviceAdapter.getQuota
-            : serviceAdapter.getUsageLimits;
+            : providerType === 'gemini-antigravity'
+                ? serviceAdapter.getQuotaSummary
+                : serviceAdapter.getUsageLimits;
         if (typeof quotaMethod !== 'function') {
             res.writeHead(501, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: { message: 'Quota lookup is not supported by this adapter.' } }));
