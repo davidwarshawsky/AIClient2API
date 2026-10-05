@@ -220,4 +220,196 @@ describe('Antigravity model availability', () => {
             jest.useRealTimers();
         }
     });
+
+    test('selects an eligible account for third-party models at the cutoff and keeps Gemini on free tier', async () => {
+        const createPool = () => {
+            const createNode = (tierId, uuid, lastUsed) => {
+                const config = {
+                    MODEL_PROVIDER: MODEL_PROVIDER.ANTIGRAVITY,
+                    uuid,
+                    isHealthy: true,
+                    isDisabled: false,
+                    needsRefresh: false,
+                    lastUsed,
+                    usageCount: 0
+                };
+                const serviceAdapter = getServiceAdapter(config);
+                serviceAdapter.antigravityApiService.tierId = tierId;
+                return {
+                    config,
+                    uuid,
+                    state: { activeCount: 0, waitingCount: 0 }
+                };
+            };
+            const freeNode = createNode('free-tier', 'antigravity-free-selection', new Date(Date.now() - 100000).toISOString());
+            const paidNode = createNode('Google AI Pro', 'antigravity-paid-selection', new Date(Date.now() - 50000).toISOString());
+            const poolManager = Object.create(ProviderPoolManager.prototype);
+            poolManager.providerStatus = { [MODEL_PROVIDER.ANTIGRAVITY]: [freeNode, paidNode] };
+            poolManager.globalConfig = {};
+            poolManager._selectionSequence = 0;
+            poolManager._isSelecting = {};
+            poolManager._checkAndRecoverScheduledProviders = jest.fn();
+            poolManager._getDisplayName = config => config.uuid;
+            poolManager._debouncedSave = jest.fn();
+            poolManager._log = jest.fn();
+            return { poolManager, freeNode, paidNode };
+        };
+
+        jest.useFakeTimers().setSystemTime(cutoff - 1);
+        try {
+            const beforeCutoff = createPool();
+            expect(beforeCutoff.poolManager._calculateNodeScore(beforeCutoff.freeNode, cutoff - 1, 0))
+                .toBeLessThan(beforeCutoff.poolManager._calculateNodeScore(beforeCutoff.paidNode, cutoff - 1, 0));
+            await expect(beforeCutoff.poolManager.selectProvider(
+                MODEL_PROVIDER.ANTIGRAVITY,
+                'gemini-claude-sonnet-4-6'
+            )).resolves.toBe(beforeCutoff.freeNode.config);
+
+            jest.setSystemTime(cutoff);
+            const atCutoff = createPool();
+            expect(atCutoff.poolManager._calculateNodeScore(atCutoff.freeNode, cutoff, 0))
+                .toBeLessThan(atCutoff.poolManager._calculateNodeScore(atCutoff.paidNode, cutoff, 0));
+            await expect(atCutoff.poolManager.selectProvider(
+                MODEL_PROVIDER.ANTIGRAVITY,
+                'gemini-claude-sonnet-4-6'
+            )).resolves.toBe(atCutoff.paidNode.config);
+            await expect(atCutoff.poolManager.selectProvider(
+                MODEL_PROVIDER.ANTIGRAVITY,
+                'gemini-3.8-flash-medium'
+            )).resolves.toBe(atCutoff.freeNode.config);
+        } finally {
+            jest.useRealTimers();
+        }
+    });
+
+    test('discovers cold account tiers before routing requests at the cutoff', async () => {
+        jest.useFakeTimers().setSystemTime(cutoff);
+
+        const createResponse = () => ({
+            writableEnded: false,
+            writeHead: jest.fn(function (statusCode) {
+                this.statusCode = statusCode;
+            }),
+            write: jest.fn(),
+            end: jest.fn(function () {
+                this.writableEnded = true;
+            }),
+            on: jest.fn(),
+            off: jest.fn()
+        });
+        const createNode = (uuid, tierId, lastUsed) => {
+            const config = {
+                MODEL_PROVIDER: MODEL_PROVIDER.ANTIGRAVITY,
+                uuid,
+                isHealthy: true,
+                isDisabled: false,
+                needsRefresh: false,
+                lastUsed,
+                usageCount: 0
+            };
+            const serviceAdapter = getServiceAdapter(config);
+            const service = serviceAdapter.antigravityApiService;
+            expect(service.tierId).toBeUndefined();
+            service.loadCredentials = jest.fn();
+            service.discoverProjectAndModels = jest.fn(async () => {
+                service.tierId = tierId;
+                service.availableModels = [
+                    'gemini-3.8-flash-medium',
+                    'gemini-claude-sonnet-4-6'
+                ];
+                return `${uuid}-project`;
+            });
+            service.isExpiryDateNear = jest.fn(() => false);
+            service.executeClaudeNonStream = jest.fn(async () => ({
+                candidates: [{ content: { role: 'model', parts: [{ text: 'paid response' }] } }]
+            }));
+            service.callApi = jest.fn(async () => ({
+                response: { candidates: [{ content: { role: 'model', parts: [{ text: 'free response' }] } }] }
+            }));
+            return { config, uuid, serviceAdapter, service, state: { activeCount: 0, waitingCount: 0 } };
+        };
+
+        try {
+            const freeNode = createNode(
+                'antigravity-cold-free',
+                'free-tier',
+                new Date(cutoff - 100000).toISOString()
+            );
+            const paidNode = createNode(
+                'antigravity-cold-paid',
+                'Google AI Pro',
+                new Date(cutoff - 50000).toISOString()
+            );
+            const poolManager = Object.create(ProviderPoolManager.prototype);
+            poolManager.providerStatus = { [MODEL_PROVIDER.ANTIGRAVITY]: [freeNode, paidNode] };
+            poolManager.globalConfig = {};
+            poolManager._selectionSequence = 0;
+            poolManager._isSelecting = {};
+            poolManager._checkAndRecoverScheduledProviders = jest.fn();
+            poolManager._getDisplayName = config => config.uuid;
+            poolManager._debouncedSave = jest.fn();
+            poolManager._log = jest.fn();
+            poolManager.markProviderHealthy = jest.fn();
+            poolManager.markProviderUnhealthy = jest.fn();
+            poolManager.markProviderUnhealthyWithRecoveryTime = jest.fn();
+            poolManager.releaseSlot = jest.fn();
+
+            const requestConfig = { CONFIG: {}, maxRetries: 0 };
+            const claudeConfig = await poolManager.selectProvider(
+                MODEL_PROVIDER.ANTIGRAVITY,
+                'gemini-claude-sonnet-4-6'
+            );
+            expect(claudeConfig).toBe(paidNode.config);
+            expect(freeNode.service.isInitialized).toBe(true);
+            expect(paidNode.service.isInitialized).toBe(true);
+            expect(freeNode.service.loadCredentials).toHaveBeenCalledTimes(1);
+            expect(paidNode.service.loadCredentials).toHaveBeenCalledTimes(1);
+            expect(freeNode.service.discoverProjectAndModels).toHaveBeenCalledTimes(1);
+            expect(paidNode.service.discoverProjectAndModels).toHaveBeenCalledTimes(1);
+
+            const claudeResponse = createResponse();
+            await handleUnaryRequest(
+                claudeResponse,
+                paidNode.serviceAdapter,
+                'gemini-claude-sonnet-4-6',
+                { contents: [{ role: 'user', parts: [{ text: 'hello' }] }] },
+                'gemini',
+                MODEL_PROVIDER.ANTIGRAVITY,
+                'none',
+                null,
+                poolManager,
+                paidNode.uuid,
+                null,
+                requestConfig
+            );
+            expect(paidNode.service.executeClaudeNonStream).toHaveBeenCalledTimes(1);
+            expect(freeNode.service.executeClaudeNonStream).not.toHaveBeenCalled();
+            expect(claudeResponse.statusCode).toBe(200);
+
+            const geminiConfig = await poolManager.selectProvider(
+                MODEL_PROVIDER.ANTIGRAVITY,
+                'gemini-3.8-flash-medium'
+            );
+            expect(geminiConfig).toBe(freeNode.config);
+            const geminiResponse = createResponse();
+            await handleUnaryRequest(
+                geminiResponse,
+                freeNode.serviceAdapter,
+                'gemini-3.8-flash-medium',
+                { contents: [{ role: 'user', parts: [{ text: 'hello' }] }] },
+                'gemini',
+                MODEL_PROVIDER.ANTIGRAVITY,
+                'none',
+                null,
+                poolManager,
+                freeNode.uuid,
+                null,
+                requestConfig
+            );
+            expect(freeNode.service.callApi).toHaveBeenCalledTimes(1);
+            expect(geminiResponse.statusCode).toBe(200);
+        } finally {
+            jest.useRealTimers();
+        }
+    });
 });
