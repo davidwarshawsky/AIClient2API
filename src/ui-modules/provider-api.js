@@ -303,10 +303,56 @@ export async function handleGetProviderType(req, res, currentConfig, providerPoo
 }
 
 /**
- * Read Copilot quota for one PAT-backed provider node.
+ * Normalize the Codex usage endpoint's rolling quota windows for the account badge.
+ */
+function normalizeCodexQuota(usage) {
+    const rateLimit = usage?.rate_limit || usage?.rateLimit || {};
+    const sourceWindows = [
+        rateLimit.primary_window || rateLimit.primaryWindow,
+        rateLimit.secondary_window || rateLimit.secondaryWindow
+    ];
+    const windows = sourceWindows.flatMap(window => {
+        if (!window || typeof window !== 'object') return [];
+        const usedPercentage = Number(window.used_percent ?? window.usedPercent);
+        if (!Number.isFinite(usedPercentage)) return [];
+
+        const durationSeconds = Number(window.limit_window_seconds ?? window.limitWindowSeconds);
+        const providedDurationMinutes = Number(window.window_duration_mins ?? window.windowDurationMins);
+        const durationMinutes = Number.isFinite(providedDurationMinutes)
+            ? providedDurationMinutes
+            : Number.isFinite(durationSeconds) && durationSeconds > 0
+                ? Math.floor(durationSeconds / 60)
+                : null;
+        const key = durationMinutes === 5 * 60
+            ? 'fiveHour'
+            : durationMinutes === 7 * 24 * 60
+                ? 'weekly'
+                : durationMinutes === 30 * 24 * 60
+                    ? 'monthly'
+                    : 'other';
+        const resetValue = window.reset_at ?? window.resetAt ?? window.resets_at ?? window.resetsAt;
+        const resetsAt = Number.isFinite(Number(resetValue)) ? Number(resetValue) : null;
+
+        return [{
+            key,
+            usedPercentage: Math.max(0, Math.min(100, usedPercentage)),
+            durationMinutes,
+            resetsAt
+        }];
+    });
+
+    return {
+        available: windows.length > 0,
+        planType: usage?.plan_type || usage?.planType || rateLimit.plan_type || rateLimit.planType || null,
+        windows
+    };
+}
+
+/**
+ * Read quota for one provider node with a supported account-level quota endpoint.
  */
 export async function handleGetProviderQuota(req, res, currentConfig, providerPoolManager, providerType, providerUuid) {
-    if (providerType !== 'github-copilot') {
+    if (providerType !== 'github-copilot' && providerType !== 'openai-codex-oauth') {
         res.writeHead(404, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ error: { message: 'Quota lookup is not supported for this provider.' } }));
         return true;
@@ -330,20 +376,26 @@ export async function handleGetProviderQuota(req, res, currentConfig, providerPo
         delete serviceConfig.providerPools;
 
         const serviceAdapter = getServiceAdapter(serviceConfig);
-        if (typeof serviceAdapter.getQuota !== 'function') {
+        const quotaMethod = providerType === 'github-copilot'
+            ? serviceAdapter.getQuota
+            : serviceAdapter.getUsageLimits;
+        if (typeof quotaMethod !== 'function') {
             res.writeHead(501, { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ error: { message: 'Quota lookup is not supported by this adapter.' } }));
             return true;
         }
 
-        const quota = await serviceAdapter.getQuota();
+        const quotaResponse = await quotaMethod.call(serviceAdapter);
+        const quota = providerType === 'github-copilot'
+            ? quotaResponse
+            : normalizeCodexQuota(quotaResponse);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ providerType, providerUuid, quota }));
         return true;
     } catch (error) {
-        logger.warn(`[UI API] Copilot quota lookup failed for provider ${providerUuid}: ${error.message}`);
+        logger.warn(`[UI API] Quota lookup failed for ${providerType} provider ${providerUuid}: ${error.message}`);
         res.writeHead(502, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ error: { message: 'Unable to retrieve GitHub Copilot quota.' } }));
+        res.end(JSON.stringify({ error: { message: 'Unable to retrieve provider quota.' } }));
         return true;
     }
 }
