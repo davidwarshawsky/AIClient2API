@@ -1,5 +1,44 @@
 const CODEX_QUOTA_CACHE_TTL_MS = 60_000;
 
+export function createCodexQuotaUsageLoader({ apiClient } = {}) {
+    return async function loadCodexQuotaUsage(providers = []) {
+        const healthyProviders = providers.filter(provider => provider?.isHealthy && !provider.isDisabled);
+        const accountUsage = await Promise.all(healthyProviders.map(async provider => {
+            if (!provider.uuid) return null;
+
+            try {
+                const response = await apiClient.get(
+                    `/providers/openai-codex-oauth/${encodeURIComponent(provider.uuid)}/quota`
+                );
+                const quota = response?.quota;
+                if (!quota?.available || !Array.isArray(quota.windows)) return null;
+
+                const percentages = quota.windows
+                    .map(window => Number(window?.usedPercentage))
+                    .filter(Number.isFinite);
+                if (percentages.length === 0) return null;
+
+                return Math.round(Math.max(...percentages.map(percentage =>
+                    Math.min(100, Math.max(0, percentage))
+                )));
+            } catch {
+                return null;
+            }
+        }));
+
+        const totalPercent = healthyProviders.length * 100;
+        if (accountUsage.some(percentage => percentage === null)) {
+            return { available: false, usedPercent: null, totalPercent };
+        }
+
+        return {
+            available: true,
+            usedPercent: accountUsage.reduce((sum, percentage) => sum + percentage, 0),
+            totalPercent
+        };
+    };
+}
+
 export function createCodexQuotaBadgeLoader({ apiClient, translate, now = Date.now } = {}) {
     const cache = new Map();
     const requests = new Map();

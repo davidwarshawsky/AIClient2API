@@ -1,4 +1,4 @@
-import { createCodexQuotaBadgeLoader } from '../static/app/codex-quota-badges.js';
+import { createCodexQuotaBadgeLoader, createCodexQuotaUsageLoader } from '../static/app/codex-quota-badges.js';
 
 describe('Codex provider quota badges', () => {
     const translations = {
@@ -89,5 +89,51 @@ describe('Codex provider quota badges', () => {
         await loadBadges(container, { forceRefresh: true, providers });
 
         expect(apiClient.get).toHaveBeenCalledTimes(providers.length * 2);
+    });
+
+    test('sums the highest quota window for each healthy enabled account', async () => {
+        const providers = [
+            { uuid: 'codex-a', isHealthy: true },
+            { uuid: 'codex-b', isHealthy: true, isDisabled: false },
+            { uuid: 'codex-c', isHealthy: false },
+            { uuid: 'codex-d', isHealthy: true, isDisabled: true }
+        ];
+        const apiClient = {
+            get: jest.fn(async url => url.endsWith('/codex-a/quota')
+                ? { quota: { available: true, windows: [{ usedPercentage: 32 }, { usedPercentage: 57 }] } }
+                : { quota: { available: true, windows: [{ usedPercentage: 81.4 }] } })
+        };
+        const loadUsage = createCodexQuotaUsageLoader({ apiClient });
+
+        await expect(loadUsage(providers)).resolves.toEqual({
+            available: true,
+            usedPercent: 138,
+            totalPercent: 200
+        });
+        expect(apiClient.get).toHaveBeenCalledTimes(2);
+        expect(apiClient.get).toHaveBeenCalledWith('/providers/openai-codex-oauth/codex-a/quota');
+    });
+
+    test('marks the aggregate unavailable if a healthy account quota cannot be read', async () => {
+        const apiClient = { get: jest.fn().mockRejectedValue(new Error('request failed')) };
+        const loadUsage = createCodexQuotaUsageLoader({ apiClient });
+
+        await expect(loadUsage([{ uuid: 'codex-a', isHealthy: true }])).resolves.toEqual({
+            available: false,
+            usedPercent: null,
+            totalPercent: 100
+        });
+    });
+
+    test('returns zero usage without requests when there are no healthy enabled accounts', async () => {
+        const apiClient = { get: jest.fn() };
+        const loadUsage = createCodexQuotaUsageLoader({ apiClient });
+
+        await expect(loadUsage([{ uuid: 'codex-a', isHealthy: false }])).resolves.toEqual({
+            available: true,
+            usedPercent: 0,
+            totalPercent: 0
+        });
+        expect(apiClient.get).not.toHaveBeenCalled();
     });
 });
