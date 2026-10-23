@@ -90,6 +90,45 @@ describe('Codex prompt cache identity', () => {
         expect(third.key).not.toBe(first.key);
     });
 
+    test('distinguishes Chat Completions chats by their first user message', () => {
+        const shared = {
+            messages: [
+                {role: 'system', content: 'You are a helpful assistant.'}
+            ],
+            tools: [{type: 'function', name: 'shell'}]
+        };
+        const first = resolveCodexCacheIdentity({
+            ...shared,
+            messages: [...shared.messages, {role: 'user', content: 'first chat'}]
+        });
+        const different = resolveCodexCacheIdentity({
+            ...shared,
+            messages: [...shared.messages, {role: 'user', content: 'different chat'}]
+        });
+
+        expect(first.key).not.toBe(different.key);
+    });
+
+    test('keeps a Chat Completions identity stable as history is appended', () => {
+        const firstTurn = {
+            messages: [
+                {role: 'system', content: 'You are a helpful assistant.'},
+                {role: 'user', content: 'start this conversation'}
+            ]
+        };
+        const followUp = {
+            ...firstTurn,
+            messages: [
+                ...firstTurn.messages,
+                {role: 'assistant', content: 'acknowledged'},
+                {role: 'user', content: 'continue'}
+            ]
+        };
+
+        expect(resolveCodexCacheIdentity(followUp).key)
+            .toBe(resolveCodexCacheIdentity(firstTurn).key);
+    });
+
     test('hashes values that are unsafe to mirror into HTTP headers', () => {
         const service = new CodexApiService({});
         const unsafe = '会话 cache key';
