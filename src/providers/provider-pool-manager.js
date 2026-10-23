@@ -1120,9 +1120,11 @@ export class ProviderPoolManager {
                     MODEL_PROVIDER: MODEL_PROVIDER.ANTIGRAVITY,
                     uuid: provider.config.uuid
                 };
-                const serviceAdapter = getServiceAdapter(providerConfig);
-                if (typeof serviceAdapter?.getUsageLimits === 'function') {
-                    void sessionManager.refreshQuota(provider.config.uuid, () => serviceAdapter.getUsageLimits());
+                if (sessionManager.shouldRefresh(provider.config.uuid, now)) {
+                    const serviceAdapter = getServiceAdapter(providerConfig);
+                    if (typeof serviceAdapter?.getUsageLimits === 'function') {
+                        void sessionManager.refreshQuota(provider.config.uuid, () => serviceAdapter.getUsageLimits());
+                    }
                 }
             }
         }
@@ -1147,6 +1149,13 @@ export class ProviderPoolManager {
                 return null;
             }
             selected = [...rankedProviders].sort((a, b) => {
+                const quotaScoreA = sessionManager?.getQuotaScore(a.config.uuid, requestedModel, now);
+                const quotaScoreB = sessionManager?.getQuotaScore(b.config.uuid, requestedModel, now);
+                if (quotaScoreA !== null && quotaScoreB === null) return -1;
+                if (quotaScoreA === null && quotaScoreB !== null) return 1;
+                if (quotaScoreA !== null && quotaScoreB !== null && quotaScoreA !== quotaScoreB) {
+                    return quotaScoreB - quotaScoreA;
+                }
                 const scoreA = this._calculateNodeScore(a, now, minSeq);
                 const scoreB = this._calculateNodeScore(b, now, minSeq);
                 if (scoreA !== scoreB) return scoreA - scoreB;
